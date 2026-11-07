@@ -1,65 +1,54 @@
 ; =============================================================================
 ; FILE: lookup_table.S
-; PERAN: 2 - Pengembang Antarmuka & Logika Pemetaan
-; DESKRIPSI: Lookup Table Chromatic E2–E4 di Program Memory (Flash)
+; DESCRIPTION: Chromatic Lookup Table (E2–E4) stored in Program Memory (Flash).
 ;
-; TOLERANSI: ±5 Cent (proporsional, precomputed — bukan ±Hz flat)
-;   Nada rendah range sempit, nada tinggi range lebih lebar.
-;   Ini perilaku yang benar secara musikal (equal temperament).
+; TOLERANCE: ±5 Cents (proportional, precomputed equal temperament).
+;   Lower octaves have narrower Hz bands; higher octaves have wider bands.
 ;
-; STRUKTUR TIAP ENTRY NOTE_TABLE (8 byte per nada):
-;   Offset +0 : batas_bawah LOW  byte (1 byte)
-;   Offset +1 : batas_bawah HIGH byte (1 byte)
-;   Offset +2 : batas_atas  LOW  byte (1 byte)
-;   Offset +3 : batas_atas  HIGH byte (1 byte)
-;   Offset +4 : ptr_nama    LOW  byte (1 byte) — byte address di Flash
-;   Offset +5 : ptr_nama    HIGH byte (1 byte)
+; ENTRY STRUCTURE FOR NOTE_TABLE (8 bytes per note):
+;   Offset +0 : lower_bound LOW  byte (1 byte)
+;   Offset +1 : lower_bound HIGH byte (1 byte)
+;   Offset +2 : upper_bound LOW  byte (1 byte)
+;   Offset +3 : upper_bound HIGH byte (1 byte)
+;   Offset +4 : ptr_name    LOW  byte (1 byte) - Flash byte address
+;   Offset +5 : ptr_name    HIGH byte (1 byte)
 ;   Offset +6 : padding     0x00 (1 byte)
 ;   Offset +7 : padding     0x00 (1 byte)
-;   TOTAL: 8 byte per entry → offset = index × 8 (shift kiri 3x)
+;   TOTAL: 8 bytes per entry -> Offset = index * 8 (left shift 3 times)
 ;
-; SEMUA DATA DI .text SECTION (Flash) — diakses dengan LPM
-; Tidak pakai .section directive khusus agar kompatibel dengan semua
-; toolchain AVR (avr-gcc, Atmel Studio, avra)
-;
-; JUMLAH NADA: 25 (E2 sampai E4, chromatic penuh)
-; REFERENSI  : A4 = 440 Hz, standard equal temperament
+; All data resides in .text section (Flash) accessed via LPM.
+; Total notes: 25 (E2 through E4, full chromatic range, reference A4 = 440 Hz)
 ; =============================================================================
 
 #define __SFR_OFFSET 0x00
 #include "avr/io.h"
 
 ; =============================================================================
-; KONSTANTA — dideklarasikan di atas agar tersedia sebelum dipakai
+; CONSTANTS
 ; =============================================================================
-.equ NOTE_COUNT,      25    ; jumlah entry di NOTE_TABLE
-.equ NOTE_ENTRY_SIZE,  8    ; byte per entry (8 = 2^3, shift kiri 3x untuk ×8)
-.equ GUITAR_STR_COUNT, 6    ; jumlah senar gitar
+.equ NOTE_COUNT,      25    ; Total entries in NOTE_TABLE
+.equ NOTE_ENTRY_SIZE,  8    ; Bytes per entry (8 = 2^3)
+.equ GUITAR_STR_COUNT, 6    ; Number of standard guitar strings
 
 ; =============================================================================
-; GUITAR_STRINGS — Mapping index senar (R23) ke index NOTE_TABLE
+; GUITAR_STRINGS — Maps target string index (R23) to NOTE_TABLE index
 ;
 ; Standard tuning: E2 A2 D3 G3 B3 E4
-; R23 dari Peran 3: 0=senar6(E2), 1=senar5(A2), 2=senar4(D3)
-;                   3=senar3(G3), 4=senar2(B3), 5=senar1(E4)
-;
-; Nilai = index NOTE_TABLE (0-based):
-;   E2 = 0, F2 = 1, ..., A2 = 5, ..., D3 = 10, ..., G3 = 15,
-;   ..., B3 = 19, ..., E4 = 24
+; R23 index: 0=String 6 (E2), 1=String 5 (A2), 2=String 4 (D3),
+;            3=String 3 (G3), 4=String 2 (B3), 5=String 1 (E4)
 ; =============================================================================
-.balign 2                   ; pastikan word-aligned
+.balign 2                   ; Ensure word alignment
 GUITAR_STRINGS:
-    .byte  0                ; R23=0 → Senar 6 = E2  (index  0)
-    .byte  5                ; R23=1 → Senar 5 = A2  (index  5)
-    .byte 10                ; R23=2 → Senar 4 = D3  (index 10)
-    .byte 15                ; R23=3 → Senar 3 = G3  (index 15)
-    .byte 19                ; R23=4 → Senar 2 = B3  (index 19)
-    .byte 24                ; R23=5 → Senar 1 = E4  (index 24)
-.balign 2                   ; padding agar NOTE_NAMES tetap word-aligned
+    .byte  0                ; R23=0 -> String 6 = E2  (index  0)
+    .byte  5                ; R23=1 -> String 5 = A2  (index  5)
+    .byte 10                ; R23=2 -> String 4 = D3  (index 10)
+    .byte 15                ; R23=3 -> String 3 = G3  (index 15)
+    .byte 19                ; R23=4 -> String 2 = B3  (index 19)
+    .byte 24                ; R23=5 -> String 1 = E4  (index 24)
+.balign 2
 
 ; =============================================================================
-; TARGET_EXACT_HZ — Nilai frekuensi referensi aktual (Exact Hz)
-; Untuk UI `display.S` pada baris referensi (Tuning String)
+; TARGET_EXACT_HZ — Exact standard reference frequencies (Hz) for strings 6 to 1
 ; =============================================================================
 TARGET_EXACT_HZ:
     .word 82
@@ -71,8 +60,7 @@ TARGET_EXACT_HZ:
 .balign 2
 
 ; =============================================================================
-; NOTE_NAMES — String nama nada, null-terminated, di Flash
-; Diakses via pointer yang disimpan di NOTE_TABLE offset +4
+; NOTE_NAMES — Null-terminated note name strings in Flash
 ; =============================================================================
 NOTE_NAMES:
 _name_E2:   .ascii "E2"  
@@ -127,13 +115,7 @@ _name_E4:   .ascii "E4"
             .byte 0
 
 ; =============================================================================
-; STATUS STRINGS — null-terminated, SEMUA DIPADDING ke 7 karakter
-; Panjang seragam mencegah ghost character saat overwrite di LCD
-;
-; "loosen " = 7 char
-; "nice   " = 7 char
-; "tighten" = 7 char
-; "-------" = 7 char (out of range marker)
+; STATUS STRINGS — Null-terminated strings padded to 7 characters
 ; =============================================================================
 STR_TOO_LOOSE:  .ascii "LOOSEN "
                 .byte 0
@@ -145,23 +127,9 @@ STR_UNKNOWN:    .ascii "-------"
                 .byte 0
 
 ; =============================================================================
-; NOTE_TABLE — Tabel utama chromatic E2–E4
-;
-; Format tiap entry (8 byte, pakai .byte eksplisit untuk hindari ambiguitas
-; word/byte address pada pointer nama):
-;
-;   .byte lo8(batas_bawah), hi8(batas_bawah)   → 2 byte
-;   .byte lo8(batas_atas),  hi8(batas_atas)    → 2 byte
-;   .byte lo8(ptr_nama),    hi8(ptr_nama)       → 2 byte (byte address Flash)
-;   .byte 0x00, 0x00                            → 2 byte padding
-;
-; Toleransi ±5 Cent (precomputed via Python):
-;   factor_up   = 2^( 5/1200) = 1.002892
-;   factor_down = 2^(-5/1200) = 0.997116
-;   batas_bawah = floor(Hz × factor_down)
-;   batas_atas  = ceil (Hz × factor_up)
+; NOTE_TABLE — Main chromatic table (E2–E4)
 ; =============================================================================
-.balign 2                   ; word-align sebelum tabel utama
+.balign 2
 NOTE_TABLE:
 
 ; E2 - 82.41 Hz
