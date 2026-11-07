@@ -4,7 +4,7 @@
 .global main
 
 main:
-    ; --- Inisialisasi USART (9600 bps, 8 Data, 1 Stop) ---
+    ; --- Initialize USART (9600 bps, 8 Data bits, 1 Stop bit) ---
     ldi r16, 0x00
     sts UBRR0H, r16
     ldi r16, 0x67
@@ -14,27 +14,27 @@ main:
     ldi r16, (1<<UCSZ01) | (1<<UCSZ00)
     sts UCSR0C, r16
 
-    ; --- Inisialisasi ADC (Single Conversion Mode, Pin PC0) ---
-    ; 1. Pastikan PC0 = input tanpa pull-up
+    ; --- Initialize ADC (Single Conversion Mode, Pin PC0) ---
+    ; 1. Ensure PC0 is input without pull-up
     ldi r16, 0x00
-    sts DDRC, r16           ; PORTC semua input
-    sts PORTC, r16          ; Pull-up dimatikan
+    sts DDRC, r16           ; Set PORTC as input
+    sts PORTC, r16          ; Disable pull-up
 
-    ; 2. Disable digital input buffer pada ADC0
+    ; 2. Disable digital input buffer on ADC0
     ldi r16, (1<<ADC0D)
     sts DIDR0, r16
 
-    ; 3. Set referensi AVCC, channel ADC0
+    ; 3. Set reference to AVCC, input channel ADC0
     ldi r16, (1<<REFS0)
     sts ADMUX, r16
 
-    ; 4. Enable ADC, prescaler 128
+    ; 4. Enable ADC with prescaler 128
     ldi r16, (1<<ADEN) | (1<<ADPS2) | (1<<ADPS1) | (1<<ADPS0) 
     sts ADCSRA, r16
     ldi r16, 0x00
     sts ADCSRB, r16
 
-    ; 5. Dummy first conversion (hasil dibuang)
+    ; 5. Perform dummy first conversion to stabilize ADC
     lds r16, ADCSRA
     ori r16, (1<<ADSC)
     sts ADCSRA, r16
@@ -43,12 +43,12 @@ dummy_wait:
     sbrc r16, ADSC
     rjmp dummy_wait
 
-    ; --- Inisialisasi Timer 1 (Normal Mode, belum jalan) ---
+    ; --- Initialize Timer 1 (Normal Mode, initially stopped) ---
     ldi r16, 0x00
     sts TCCR1A, r16
-    sts TCCR1B, r16         ; Timer 1 mati dulu
+    sts TCCR1B, r16         ; Timer 1 halted
 
-    ; --- Macro untuk membaca ADC (Single Conversion Polling) ---
+    ; --- Macro: Read ADC (Single Conversion Polling) ---
     .macro BACA_ADC
         lds r19, ADCSRA
         ori r19, (1<<ADSC)
@@ -61,7 +61,7 @@ dummy_wait:
         lds r17, ADCH
     .endm
 
-    ; --- Macro untuk kirim 1 byte via USART ---
+    ; --- Macro: Send 1 Byte via USART ---
     .macro KIRIM_BYTE reg
     wait_tx_\@:
         lds r19, UCSR0A
@@ -72,7 +72,7 @@ dummy_wait:
 
 main_loop:
 
-    ; --- Reset Timeout Counter ---
+    ; --- Reset Timeout Watchdog Counter ---
     clr r26
     clr r27
 
@@ -82,20 +82,20 @@ main_loop:
     sts TCNT1H, r16         ; Reset counter
     sts TCNT1L, r16
 
-    ; --- Fase 1: Tunggu sinyal turun di bawah 511 (0x01FF) ---
+    ; --- Phase 1: Wait for signal to fall below 511 (0x01FF) ---
 fase_1_turun:
     BACA_ADC
-    adiw r26, 1             ; Tambah counter timeout
-    cpi r27, 0x08           ; Jika timeout tercapai
+    adiw r26, 1             ; Increment timeout watchdog
+    cpi r27, 0x08           ; Check timeout threshold
     brlo skip_to1
-    rjmp send_zero          ; Paksa kirim 0 Hz
+    rjmp send_zero          ; Force send 0 Hz if signal lost
 skip_to1:
     cpi r16, 0xFF
     ldi r18, 0x01
     cpc r17, r18
     brsh fase_1_turun
 
-    ; --- Fase 2: Tunggu sinyal naik di atas 513 (0x0201) -> START ---
+    ; --- Phase 2: Wait for signal to rise above 513 (0x0201) -> START ---
 fase_2_naik:
     BACA_ADC
     adiw r26, 1
@@ -108,11 +108,11 @@ skip_to2:
     cpc r17, r18
     brlo fase_2_naik
 
-    ; Gelombang pertama terdeteksi! Mulai Timer 1 (Prescaler 8)
+    ; Zero-crossing edge detected! Start Timer 1 (Prescaler 8 -> 2 MHz tick rate @ 16 MHz CPU)
     ldi r16, (1<<CS11)
     sts TCCR1B, r16
 
-    ; --- Fase 3: Tunggu sinyal turun lagi di bawah 511 (0x01FF) ---
+    ; --- Phase 3: Wait for signal to fall below 511 (0x01FF) again ---
 fase_3_turun:
     BACA_ADC
     adiw r26, 1
@@ -125,7 +125,7 @@ skip_to3:
     cpc r17, r18
     brsh fase_3_turun
 
-    ; --- Fase 4: Tunggu sinyal naik lagi di atas 513 (0x0201) -> STOP ---
+    ; --- Phase 4: Wait for signal to rise above 513 (0x0201) again -> STOP ---
 fase_4_naik:
     BACA_ADC
     adiw r26, 1
@@ -138,31 +138,31 @@ skip_to4:
     cpc r17, r18
     brlo fase_4_naik
 
-    ; 1 Periode Selesai! Hentikan Timer 1
+    ; Full period elapsed: Stop Timer 1
     ldi r16, 0x00
     sts TCCR1B, r16
 
-    ; Baca durasi periode (ticks) dari Timer 1
+    ; Read measured period duration (clock ticks) from Timer 1
     lds r20, TCNT1L
     lds r21, TCNT1H
 
-    ; --- Validasi: skip jika ticks = 0 ---
+    ; --- Validation: skip calculation if ticks = 0 ---
     mov r16, r20
     or  r16, r21
     brne div_start
     rjmp main_loop
 
-; --- Handler Timeout ---
+; --- Watchdog Timeout Handler ---
 send_zero:
-    clr r24                 ; Set frekuensi 0
+    clr r24                 ; Frequency = 0 Hz
     clr r25
-    rjmp transmisi_mulai    ; Langsung kirim ke Master
+    rjmp transmisi_mulai    ; Forward 0 Hz directly to Master
 
 div_start:
 
-    ; --- Hitung Frekuensi: Hz = 2.000.000 / ticks ---
-    ; Dividend (32-bit): 2.000.000 = 0x001E8480 -> r15:r14:r13:r12
-    ; Divisor (16-bit): ticks -> r21:r20
+    ; --- Calculate Frequency: Hz = 2,000,000 / ticks ---
+    ; Dividend (32-bit): 2,000,000 = 0x001E8480 -> r15:r14:r13:r12
+    ; Divisor (16-bit):  ticks -> r21:r20
     ; Quotient (16-bit): Hz -> r25:r24
 
     ldi r16, 0x80
@@ -209,28 +209,28 @@ div_next:
     rjmp div_loop
 
 div_done:
-    ; r25:r24 = frekuensi dalam Hz (16-bit)
+    ; r25:r24 = Frequency in Hz (16-bit)
 
-    ; --- 1. Pencegahan Konflik Data ---
-    ; Sync Byte = 0xFF, jadi data aktual tidak boleh bernilai 0xFF
+    ; --- 1. Prevent Sync Collision ---
+    ; Sync Byte is 0xFF, so actual payload bytes must not equal 0xFF
     cpi r25, 0xFF
     brne cek_low_byte
-    ldi r25, 0xFE           ; Paksa turun ke 0xFE
+    ldi r25, 0xFE           ; Clamp down to 0xFE
 
 cek_low_byte:
     cpi r24, 0xFF
     brne transmisi_mulai
-    ldi r24, 0xFE           ; Paksa turun ke 0xFE
+    ldi r24, 0xFE           ; Clamp down to 0xFE
 
 transmisi_mulai:
-    ; --- 2. Transmisi USART (Protokol: Sync -> Low -> High) ---
+    ; --- 2. USART Transmission (Protocol: Sync -> Low Byte -> High Byte) ---
     ldi r16, 0xFF
-    KIRIM_BYTE r16          ; Sync Byte (penanda awal paket)
+    KIRIM_BYTE r16          ; Sync Byte (packet header)
     KIRIM_BYTE r24          ; Low Byte (Little-Endian)
     KIRIM_BYTE r25          ; High Byte
 
-    ; --- 3. Rate Limiting (Delay ~150ms @ 16 MHz) ---
-    ; Mencegah Slave membanjiri USART, beri Master waktu proses LCD
+    ; --- 3. Rate Limiting Delay (~150ms @ 16 MHz) ---
+    ; Prevents flooding the serial bus and allows Master time to update I2C LCD
     ldi r18, 13
 delay_outer:
     ldi r19, 250

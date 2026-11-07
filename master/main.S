@@ -7,15 +7,14 @@
 
 .section .text
 
-; === FILE PERAN 2 — JANGAN UBAH URUTAN ===
-; (Uncomment baris di bawah ini ketika file Peran 2 sudah siap untuk digabungkan)
-#include "lcd_i2c.S"        // 1. TWI primitives dulu
-#include "lcd_driver.S"     // 2. LCD driver (butuh TWI)
-#include "lookup_table.S"   // 3. Data tabel di Flash
-#include "bcd_ascii.S"      // 4. Konverter angka
-#include "mapping.S"        // 5. Logika mapping (butuh tabel)
-#include "display.S"        // 6. Update display (butuh semua di atas)
-; === END FILE PERAN 2 ===`n#include "usart_rx.S"`n#include "buzzer_core.S" 
+; === ROLE 2 MODULES — DO NOT CHANGE ORDER ===
+#include "lcd_i2c.S"        // 1. Low-level TWI primitives
+#include "lcd_driver.S"     // 2. LCD driver (requires TWI)
+#include "lookup_table.S"   // 3. Flash table data
+#include "bcd_ascii.S"      // 4. Number-to-ASCII converter
+#include "mapping.S"        // 5. Mapping logic (requires lookup table)
+#include "display.S"        // 6. Display update routines (requires modules above)
+; === END ROLE 2 MODULES ===
 
 main:
     ; Init Stack Pointer
@@ -26,15 +25,10 @@ main:
 
     ; Clear Registers
     clr r1
-    clr r22           ; R22 = Flag Data Baru
-    clr r23           ; R23 = Index target senar (0 = E2)
+    clr r22           ; R22 = New Data Flag
+    clr r23           ; R23 = Target string index (0 = E2)
     clr r24           ; R24 = Low Byte Hz
     clr r25           ; R25 = High Byte Hz
-
-    ; [FIX UI] Inisialisasi layang pertama, angkat flag R22 agar setelah reset 
-    ; LCD langsung masuk ke tampilan Tuner Utama (menampilkan 0 Hz),
-    ; bukan stuck diam selamanya di string "Initializing.." !
-    ;ldi r22, 0x01
 
     ; Set INT0 (PD2) and INT1 (PD3) as Input with Pull-up
     cbi DDRD, 2
@@ -44,7 +38,7 @@ main:
 
     ; Configure External Interrupts INT0 & INT1
     ; INT0: Trigger on Falling Edge     (ISC01=1, ISC00=0)
-    ; INT1: Trigger on Any Logic Change (ISC11=0, ISC10=1) -> Untuk HOLD buzzer
+    ; INT1: Trigger on Any Logic Change (ISC11=0, ISC10=1) -> For Buzzer HOLD
     ldi r16, (0<<ISC11) | (1<<ISC10) | (1<<ISC01) | (0<<ISC00)
     sts EICRA, r16
     ; Enable INT0 and INT1
@@ -55,41 +49,38 @@ main:
     rcall USART_INIT
     rcall BUZZER_INIT
     
-    ; [FIX BUG #4] LCD_INIT di-uncomment — wajib dipanggil sekali di RESET
+    ; LCD initialization - called once on RESET
     RCALL LCD_INIT
-    RCALL DISPLAY_STARTUP   ; tampilkan splash screen (opsional)
+    RCALL DISPLAY_STARTUP   ; Optional startup splash screen
 
     ; Enable Global Interrupts
     sei
 
 MAIN_LOOP:
-    ; Check if flag data baru R22 == 0x01
+    ; Check if new data flag R22 == 0x01
     cpi r22, 0x01
     brne MAIN_LOOP
     
-    ; Jika data baru ada, reset flag
+    ; Reset flag once new data is detected
     clr r22
 
-    ; [FIX RACE CONDITION] Load Hz terbaru dari SRAM ke R24/R25 tepat sebelum render.
-    ; ISR tidak lagi menulis langsung ke R24/R25 — data disimpan di rx_final_lo/hi.
-    ; Ini mencegah nilai baru dari ISR ter-overwrite oleh POP di dalam UPDATE_DISPLAY.
+    ; Load latest Hz from SRAM into R24/R25 right before rendering.
+    ; ISR stores incoming data to rx_final_lo/hi to avoid clobbering.
     lds r24, rx_final_lo
     lds r25, rx_final_hi
 
-    ; [FIX BUG #4] UPDATE_DISPLAY di-uncomment — dipanggil tiap data baru siap
+    ; Update LCD with fresh frequency & tuning state
     RCALL UPDATE_DISPLAY
 
     rjmp MAIN_LOOP
 
 
-; --- ISR for INT0 (Mode / String Index) ---
+; --- ISR for INT0 (Mode / Target String Index) ---
 INT0_vect:
     push r16
     in r16, SREG
     push r16
-    ; [FIX BUG #3] Simpan R17, ZH, ZL sebelum panggil BUZZER_UPDATE_FREQ
-    ; BUZZER_UPDATE_FREQ memodifikasi ketiga register ini tanpa push/pop sendiri,
-    ; sehingga akan merusak nilai milik kode yang sedang diinterupsi (mis. UPDATE_DISPLAY)
+    ; Preserve R17, ZH, ZL before calling BUZZER_UPDATE_FREQ
     push r17
     push zh
     push zl
@@ -103,13 +94,13 @@ reset_mode:
     clr r23
 end_int0:
 
-    ; Secara opsional set R22=1 agar layar di-update pas ganti senar, walau blm ada input Hz baru
+    ; Set R22=1 to refresh screen upon string switch
     ldi r22, 0x01
 
-    ; Update frekuensi buzzer jika sedang nyala
+    ; Update buzzer frequency if active
     rcall BUZZER_UPDATE_FREQ
 
-    ; [FIX BUG #3] Pulihkan ZL, ZH, R17 dalam urutan LIFO
+    ; Restore ZL, ZH, R17 in LIFO order
     pop zl
     pop zh
     pop r17
@@ -124,15 +115,14 @@ INT1_vect:
     push r16
     in r16, SREG
     push r16
-    ; [FIX BUG #3] Simpan R17, ZH, ZL — BUZZER_TOGGLE memanggil BUZZER_UPDATE_FREQ
-    ; yang memodifikasi R17, ZH, ZL tanpa menyelamatkannya sendiri
+    ; Preserve R17, ZH, ZL across BUZZER_TOGGLE
     push r17
     push zh
     push zl
 
     rcall BUZZER_TOGGLE
 
-    ; [FIX BUG #3] Pulihkan ZL, ZH, R17 dalam urutan LIFO
+    ; Restore ZL, ZH, R17 in LIFO order
     pop zl
     pop zh
     pop r17

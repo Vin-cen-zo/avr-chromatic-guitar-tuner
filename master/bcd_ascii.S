@@ -1,109 +1,78 @@
 ; =============================================================================
 ; FILE: bcd_ascii.S
-; PERAN: 2 - Pengembang Antarmuka & Logika Pemetaan
-; DESKRIPSI: Konverter bilangan biner 16-bit → string ASCII desimal
-;            Dipakai untuk menampilkan nilai Hz aktual di LCD
+; DESCRIPTION: 16-bit binary integer to decimal ASCII converter.
+;              Used to render real-time measured frequency (Hz) onto the LCD.
 ;
-; DEPENDENSI: lcd_driver.S harus di-#include SEBELUM file ini
+; DEPENDENCY: lcd_driver.S must be #included BEFORE this file.
 ;
-; FUNGSI PUBLIK:
-;   PRINT_HZ → cetak nilai Hz dari R25:R24 langsung ke LCD
-;              format output: "XXX" (3 digit, max 999)
-;              cursor harus sudah diset dengan LCD_GOTOXY sebelum RCALL
+; PUBLIC FUNCTIONS:
+;   PRINT_HZ        -> Prints Hz value from R25:R24 directly to LCD.
+;                      Output format: "XXX" (3 digits, zero-padded, max 999).
+;                      Cursor position must be preset using LCD_GOTOXY.
+;   PRINT_STR_FLASH -> Prints null-terminated string from Flash pointed by Z.
 ;
-; MENGAPA HANYA 3 DIGIT?
-;   Range frekuensi kita E2(82Hz) - E4(330Hz), max 3 digit desimal.
-;   Tidak perlu 4 digit → hemat kolom LCD.
+; FREQUENCY RANGE:
+;   Target guitar range E2 (82 Hz) to E4 (330 Hz) fits within 3 decimal digits.
 ;
-; ALGORITMA:
-;   Bilangan 16-bit dibagi berulang dengan 10 (division by repeated subtraction
-;   atau shift — kita pakai metode divide 16-bit karena AVR tidak punya DIV):
-;   1. Bagi Hz dengan 100 → dapat digit ratusan
-;   2. Sisa bagi 10       → dapat digit puluhan
-;   3. Sisa               → digit satuan
-;   4. Tiap digit + 0x30  → ASCII
-;   5. Kirim ke LCD via LCD_CHAR
-;
-; REGISTER YANG DIPAKAI INTERNAL:
-;   R25:R24 = nilai Hz input (tidak dimodifikasi — di-PUSH/POP)
-;   R20     = digit ratusan
-;   R21     = digit puluhan
-;   R24     = digit satuan (sisa langsung dari DIV16_10, tidak perlu register terpisah)
-;   R16     = temp untuk LCD_CHAR
-;   R18     = temp pembagian
-; [FIX BUG #6] R22 dihapus dari PRINT_HZ — mencegah race condition dengan ISR USART:
-;   ISR bisa set R22=0x01 (flag data baru) saat PRINT_HZ sedang berjalan.
-;   Jika R22 di-PUSH di awal dan POP di akhir PRINT_HZ, nilai flag dari ISR akan hilang.
+; ALGORITHM:
+;   Repeated subtraction division:
+;   1. Divide Hz by 100 -> hundreds digit
+;   2. Remainder divided by 10 -> tens digit
+;   3. Remainder -> units digit
+;   4. Convert each digit to ASCII (+0x30) and output to LCD.
 ; =============================================================================
 
 #define __SFR_OFFSET 0x00
 #include "avr/io.h"
 
 ; =============================================================================
-; DIV16_BY_CONST  [INTERNAL MACRO HELPER]
-; Karena AVR tidak punya instruksi DIV, kita pakai subrutin pembagian
-; 16-bit dengan konstanta via repeated subtraction.
-;
-; Untuk nilai kita (max 330Hz), repeated subtraction cukup cepat:
-;   330 / 100 = maks 3 iterasi → sangat ringan
-;   30  / 10  = maks 9 iterasi → masih ringan
-; =============================================================================
-
-; =============================================================================
-; DIV16_100  [INTERNAL]
-; Deskripsi : Bagi R25:R24 dengan 100
-;             Hasil bagi → R20 (digit ratusan)
-;             Sisa       → R25:R24 (untuk tahap berikutnya)
-; Input     : R25:R24 = bilangan yang dibagi
-; Output    : R20     = hasil bagi (0–3 untuk range kita)
-;             R25:R24 = sisa pembagian
-; Modifikasi: R18, R19 (di-PUSH/POP)
+; DIV16_100 [INTERNAL]
+; Description: Divides R25:R24 by 100.
+; Input      : R25:R24 = dividend
+; Output     : R20     = quotient (hundreds digit)
+;              R25:R24 = remainder
+; Clobbers   : Preserves R18, R19 via PUSH/POP
 ; =============================================================================
 DIV16_100:
     PUSH R18
     PUSH R19
 
-    CLR  R20                ; hasil bagi = 0
+    CLR  R20                ; quotient = 0
 
 _div100_loop:
-    ; Cek apakah R25:R24 >= 100
-    ; Caranya: kurangi 100, kalau hasilnya negatif (carry) → berhenti
     LDI  R18, lo8(100)
     LDI  R19, hi8(100)     ; R19:R18 = 100
 
-    ; Coba kurangi: R25:R24 - 100
     SUB  R24, R18
-    SBC  R25, R19           ; kurangi dengan borrow
+    SBC  R25, R19           ; subtract with borrow
 
-    BRCS _div100_done       ; kalau carry (hasil negatif) → selesai
+    BRCS _div100_done       ; exit on carry/negative
 
-    INC  R20                ; hasil bagi++
+    INC  R20
     RJMP _div100_loop
 
 _div100_done:
-    ; Karena kita overdraft (kurang sekali terlalu banyak), kembalikan
+    ; Restore last overdraft subtraction
     ADD  R24, R18
-    ADC  R25, R19           ; sisa = sisa + 100 (batalkan pengurangan terakhir)
+    ADC  R25, R19
 
     POP  R19
     POP  R18
     RET
 
 ; =============================================================================
-; DIV16_10  [INTERNAL]
-; Deskripsi : Bagi R25:R24 dengan 10
-;             Hasil bagi → R21 (digit puluhan)
-;             Sisa       → R25:R24 (untuk tahap berikutnya)
-; Input     : R25:R24 = sisa dari DIV16_100 (nilai 0–99)
-; Output    : R21     = hasil bagi (0–9)
-;             R25:R24 = sisa pembagian (0–9)
-; Modifikasi: R18, R19 (di-PUSH/POP)
+; DIV16_10 [INTERNAL]
+; Description: Divides R25:R24 by 10.
+; Input      : R25:R24 = remainder from DIV16_100 (0-99)
+; Output     : R21     = quotient (tens digit)
+;              R25:R24 = remainder (units digit, 0-9)
+; Clobbers   : Preserves R18, R19 via PUSH/POP
 ; =============================================================================
 DIV16_10:
     PUSH R18
     PUSH R19
 
-    CLR  R21                ; hasil bagi = 0
+    CLR  R21                ; quotient = 0
 
 _div10_loop:
     LDI  R18, lo8(10)
@@ -118,7 +87,7 @@ _div10_loop:
     RJMP _div10_loop
 
 _div10_done:
-    ; Kembalikan overdraft
+    ; Restore last overdraft subtraction
     ADD  R24, R18
     ADC  R25, R19
 
@@ -128,16 +97,11 @@ _div10_done:
 
 ; =============================================================================
 ; PRINT_HZ
-; Deskripsi : Konversi nilai Hz 16-bit ke ASCII dan cetak ke LCD
-;             Format output: "XXX" (3 digit, zero-padded)
-;             Contoh: 82Hz → "082", 110Hz → "110", 330Hz → "330"
-;
-;             PERHATIAN: Set posisi cursor dengan LCD_GOTOXY dulu
-;             sebelum memanggil fungsi ini.
-;
-; Input     : R25:R24 = nilai Hz (dari Peran 3, range 0–999)
-; Output    : Tidak ada (langsung cetak ke LCD)
-; Modifikasi: Semua register di-PUSH/POP — aman dipanggil dari mana saja
+; Description: Converts 16-bit Hz value to 3-digit ASCII and writes to LCD.
+;              Output format: "XXX" (zero-padded, e.g. "082", "110", "330")
+; Input      : R25:R24 = frequency in Hz (0-999)
+; Output     : None (drawn directly to LCD)
+; Clobbers   : None (all registers safely saved/restored)
 ; =============================================================================
 PRINT_HZ:
     PUSH R16
@@ -145,40 +109,35 @@ PRINT_HZ:
     PUSH R19
     PUSH R20
     PUSH R21
-    ; [FIX BUG #6] PUSH R22 dihapus — R22 tidak lagi dipakai di dalam fungsi ini
     PUSH R24
     PUSH R25
 
-    ; --- Tahap 1: Ekstrak digit ratusan ---
-    RCALL DIV16_100         ; R20 = ratusan, R25:R24 = sisa
+    ; --- Step 1: Extract hundreds digit ---
+    RCALL DIV16_100         ; R20 = hundreds, R25:R24 = remainder
 
-    ; --- Tahap 2: Ekstrak digit puluhan ---
-    RCALL DIV16_10          ; R21 = puluhan, R25:R24 = sisa
+    ; --- Step 2: Extract tens digit ---
+    RCALL DIV16_10          ; R21 = tens, R25:R24 = remainder
 
-    ; --- Tahap 3: Digit satuan = sisa ---
-    ; [FIX BUG #6] R24 sudah berisi digit satuan (sisa dari DIV16_10, R25 pasti 0).
-    ; Tidak perlu MOV ke R22 — langsung dipakai dari R24 di Tahap 4.
+    ; --- Step 3: Units digit is remaining R24 ---
 
-    ; --- Tahap 4: Konversi ke ASCII dan print ---
-    ; Digit ratusan
+    ; --- Step 4: Convert to ASCII and print ---
+    ; Hundreds digit
     MOV  R16, R20
-    ORI  R16, 0x30          ; tambah 0x30 → ASCII ('0'=0x30, '1'=0x31, dst)
+    ORI  R16, 0x30          ; Add 0x30 -> ASCII ('0' = 0x30)
     RCALL LCD_CHAR
 
-    ; Digit puluhan
+    ; Tens digit
     MOV  R16, R21
     ORI  R16, 0x30
     RCALL LCD_CHAR
 
-    ; Digit satuan
-    ; [FIX BUG #6] Ambil langsung dari R24 (sisa DIV16_10), bukan R22
+    ; Units digit
     MOV  R16, R24
     ORI  R16, 0x30
     RCALL LCD_CHAR
 
     POP  R25
     POP  R24
-    ; [FIX BUG #6] POP R22 dihapus — simetris dengan PUSH R22 yang juga sudah dihapus
     POP  R21
     POP  R20
     POP  R19
@@ -187,32 +146,12 @@ PRINT_HZ:
     RET
 
 ; =============================================================================
-; PRINT_STR_FLASH  [HELPER PUBLIK]
-; Deskripsi : Shortcut print string dari Flash dengan pointer langsung
-;             Wrapper atas LCD_STRING agar display.S lebih rapi
-;
-; Input     : ZH:ZL = pointer ke string di Flash
-; Output    : Tidak ada
-; Modifikasi: R16, R18 via LCD_STRING (di-PUSH/POP di dalam LCD_STRING)
-;             Z register akan berubah setelah selesai (by design)
+; PRINT_STR_FLASH [PUBLIC HELPER]
+; Description: Prints a null-terminated string stored in Flash memory.
+; Input      : ZH:ZL = Pointer to string in Flash
+; Output     : None
+; Clobbers   : Z pointer increments through the string
 ; =============================================================================
 PRINT_STR_FLASH:
-    RCALL LCD_STRING        ; langsung delegasi ke LCD_STRING
+    RCALL LCD_STRING
     RET
-
-; =============================================================================
-; CONTOH PENGGUNAAN (jangan hapus komentar ini):
-;
-; Print Hz aktual di baris 1 kolom 3:
-;   LDI  R16, 1             ; baris 1
-;   LDI  R17, 3             ; kolom 3
-;   RCALL LCD_GOTOXY
-;   ; R25:R24 sudah berisi Hz dari Peran 3
-;   RCALL PRINT_HZ          ; cetak "110" (kalau Hz=110)
-;
-; Print string status dari Flash:
-;   LDI  ZH, hi8(STR_TOO_LOOSE)
-;   LDI  ZL, lo8(STR_TOO_LOOSE)
-;   RCALL PRINT_STR_FLASH
-;
-; =============================================================================
